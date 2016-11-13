@@ -19,7 +19,8 @@
     get_field/3,
     copy_fields/2,
     is_iolist_empty/1,
-    has_behaviour/2
+    has_behaviour/2,
+    ensure_loaded/1
 ]).
 
 -define(COPY_TO_BASERECORD(Name, Size, Record),
@@ -177,7 +178,7 @@ is_iolist_empty(_) -> false.
 debug() ->
     % Get all web and wf modules.
     F = fun(X) ->
-        {value, {source, Path}} = lists:keysearch(source, 1, X:module_info(compile)), Path
+        {source, Path} = lists:keyfind(source, 1, X:module_info(compile)), Path
     end,
 
     L =  [list_to_binary(atom_to_list(X)) || X <- erlang:loaded()],
@@ -219,3 +220,6 @@ has_behaviour(Module, Behaviour) ->
     catch
         _:_ -> false
     end.
+
+ensure_loaded(Module) ->
+    wf:cache({ensure_loaded, Module}, 1000, fun() -> code:ensure_loaded(Module) end).

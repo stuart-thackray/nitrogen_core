@@ -10,6 +10,7 @@
         bridge/0,
         bridge/1,
 
+        in_request/0,
         socket/0,
 
         path/0,
@@ -97,6 +98,8 @@
         context/1
     ]).
 
+-export([increment/1]).
+
 %% Exports for backwards compatibility
 -export([
         request_bridge/0,
@@ -117,7 +120,12 @@ bridge(Bridge) ->
     Context = context(),
     context(Context#context{bridge=Bridge}).
 
-socket() ->
+in_request() ->
+    %% If we have a context set and it is a #context{} tuple, then we are in a
+    %% request.
+    is_record(context(), context).
+
+ socket() ->
     ?BRIDGE:socket().
 
 path() ->
@@ -465,6 +473,12 @@ make_handler(Name, Module) ->
 context() -> get(context).
 context(Context) -> put(context, Context).
 
+%% for debugging. Remove when ready
+increment(Key) ->
+    case get(Key) of
+        undefined -> put(Key, 1);
+        V -> io:format("~p=~p~n",[Key, V+1]), put(Key, V+1)
+    end.
 
 %% Kept for backwards compatibility with nitrogen 2.2 and below (and
 %% simple_bridge 1.x)

@@ -14,6 +14,7 @@
     to_binary/1,
     to_unicode_binary/1,
     to_integer/1,
+    to_float/1,
     to_string_list/1,
     to_qs/1,
     parse_qs/1,
@@ -101,6 +102,18 @@ to_integer(I) when is_integer(I) -> I;
 to_integer(L) when is_list(L) -> list_to_integer(L);
 to_integer(F) when is_float(F) -> round(F).
 
+-spec to_float(term()) -> float().
+to_float(F) when is_float(F) -> F;
+to_float(I) when is_integer(I) -> float(I);
+to_float(T) when is_list(T);
+                 is_binary(T);
+                 is_atom(T) -> safe_to_float(wf:to_list(T)).
+
+safe_to_float(L) when is_list(L) ->
+    try list_to_float(L)
+    catch _:badarg -> float(list_to_integer(L))
+    end.
+
 %%% TO STRING LIST %%%
 
 %% @doc
@@ -186,12 +199,32 @@ ihe(Other, _ET)                         -> Other.
 html_decode(B) when is_binary(B) -> html_decode(binary_to_list(B));
 html_decode([]) -> [];
 html_decode("&amp;" ++ T) -> [$&|html_decode(T)];
-html_decode("&#39;" ++ T) -> [$'|html_decode(T)];
 html_decode("&quot;" ++ T) -> [$"|html_decode(T)];
 html_decode("&gt;" ++ T) -> [$>|html_decode(T)];
 html_decode("&lt;" ++ T) -> [$<|html_decode(T)];
 html_decode("&nbsp;" ++ T) -> [$\s|html_decode(T)];
+html_decode([$&, $#, Num | T]) when Num >= $0, Num =< $9 ->
+    {CharString,Rest} = html_numeric_decode([Num|T], T, [Num]),
+    CharString ++ html_decode(Rest);
 html_decode([H|T]) -> [H|html_decode(T)].
+
+html_numeric_decode(Orig, [H|T],Acc) when H >= $0, H =< $9 ->
+    %% It's still a number, so we're growing with it.
+    html_numeric_decode(Orig, T,[H|Acc]);
+html_numeric_decode(Orig, [H|T],Acc) when H =:= $; ->
+    Num = list_to_integer(lists:reverse(Acc)),
+
+    case unicode:characters_to_list([Num]) of
+        %% the number code doesn't translate to %% valid unicode codepoint, so we just
+        %% return the html code that triggered the numeric decode and the
+        %% original rest ofthe string, and continue
+        {error, _, _} -> {"&#", Orig}; 
+        CharString -> {CharString, T}
+    end;
+html_numeric_decode(Orig, _, _) ->
+    %% if we encounter *anything else*, then it's not a valid thing, and we
+    %% just return the original string with the char code being "&#" since that's the trigger
+    {"&#", Orig}.
 
 %%% HEX ENCODE and HEX DECODE
 
@@ -450,6 +483,12 @@ html_encode_test() ->
     ?assertEqual(<<"A{}">>,iolist_to_binary(html_encode(["A",{}]))),
     ?assertEqual(<<"A{b,c,d}">>, iolist_to_binary(html_encode(["A",{b,c,d}]))),
     ?assertEqual(<<"{a}">>, iolist_to_binary(html_encode({a}))),
+
+    % Decode
+    
+    ?assertEqual("'", html_decode(html_encode("'"))),
+    ?assertEqual("ドラゴンは私になります", html_decode(html_encode("ドラゴンは私になります"))),
+
     ok.
 
 to_qs_test() ->

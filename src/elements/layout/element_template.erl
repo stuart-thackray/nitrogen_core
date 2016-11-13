@@ -1,13 +1,15 @@
 % vim: sw=4 ts=4 et ft=erlang
 % Nitrogen Web Framework for Erlang
 % Copyright (c) 2008-2013 Rusty Klophaus
+% Copyright (c) 2014-2015 Jesse Gumm
 % See MIT-LICENSE for licensing information.
 
 -module (element_template).
 -include("wf.hrl").
 -export([
     reflect/0,
-    render_element/1
+    render_element/1,
+    passthrough/1
 ]).
 
 % TODO - Revisit parsing in the to_module_callback. This
@@ -32,9 +34,9 @@ render_element(Record) ->
 
     % Evaluate the template.
 
-    %% erl_eval:exprs/2 expects Bindings to be an orddict, but Nitrogen 
-    %% does not have this requirement, so let's fix that.
-    %% create the needed Ord-Dict just once instead for every eval call down the chain
+    %% erl_eval:exprs/2 expects Bindings to be an orddict, but Nitrogen does
+    %% not have this requirement, so let's fix that.  create the needed
+    %% Ord-Dict just once instead for every eval call down the chain
     OrdDictBindings = orddict:from_list(Record#template.bindings),
     Fixed_bindings_record = Record#template{bindings=OrdDictBindings},
     Body = eval(Template, Fixed_bindings_record, ModuleAliases),
@@ -42,42 +44,44 @@ render_element(Record) ->
 
 get_cached_template(File) ->
     FileAtom = list_to_atom("template_file_" ++ File),
-
-    LastModAtom = list_to_atom("template_lastmod_" ++ File),
-    LastMod = nitro_mochiglobal:get(LastModAtom),
-
-    CacheTimeAtom = list_to_atom("template_cachetime_" ++ File),
-    CacheTime = nitro_mochiglobal:get(CacheTimeAtom),
-
-    %% Check for recache if one second has passed since last cache time...
-    ReCache = case (CacheTime == undefined) orelse (timer:now_diff(os:timestamp(), CacheTime) > (1000 * 1000)) of
+   
+    case is_time_to_recache(File, FileAtom) of
         true ->
-            %% Recache if the file has been modified. Otherwise, reset
-            %% the CacheTime timer...
-            case LastMod /= filelib:last_modified(File) of
-                true ->
-                    true;
-                false ->
-                    nitro_mochiglobal:put(CacheTimeAtom, os:timestamp()),
-                    false
-            end;
-        false ->
-            false
-    end,
-
-    case ReCache of
-        true ->
+            wf:info("Recaching Template: ~s",[File]),
             %% Recache the template...
             Template = parse_template(File),
-            nitro_mochiglobal:put(FileAtom, Template),
-            nitro_mochiglobal:put(LastModAtom, filelib:last_modified(File)),
-            nitro_mochiglobal:put(CacheTimeAtom, os:timestamp()),
+            wf:set_cache({tempate_last_recached, FileAtom}, {date(), time()}),
+            wf:set_cache({template, FileAtom}, Template),
             Template;
         false ->
             %% Load template from cache...
-            nitro_mochiglobal:get(FileAtom)
+            wf:cache({template, FileAtom}, fun() ->
+                %% Load the mochiglobal value for easier migration of a live
+                %% system.  In a few versions, we can just get rid of
+                %% nitro_mochiglobal altogether.
+                nitro_mochiglobal:get(FileAtom)
+            end)
     end.
 
+is_time_to_recache(File, FileAtom) ->
+    %% First we check the last time the template was recached/recompiled. This
+    %% will be used to compare against the time the file was updated on the
+    %% filesystem. When it's first loaded, it'll be recorded as a "Never" tuple
+    %% ({0,0,0}, {0,0,0}}) to ensure that all future dates tuples are greater
+    %% than it.
+    Never = fun() -> {{0,0,0}, {0,0,0}} end,
+    LastRecached = wf:cache({tempate_last_recached, FileAtom}, infinity, Never),
+
+    %% Now we load the file's last modified time from the filesystem, and cache
+    %% that result for one second. That way we're not hammering the filesystem
+    %% over and over for the same file.
+    GetLastModified = fun() -> filelib:last_modified(File) end,
+    LastModified = wf:cache({template_last_modified, FileAtom}, 1000, GetLastModified),
+
+    %% Finally if the file's last modification date is after the last time it
+    %% was recached, we need to recache it.
+    LastModified > LastRecached.
+            
 parse_template(File) ->
     % TODO - Templateroot
     % File1 = filename:join(nitrogen:get_templateroot(), File),
@@ -159,24 +163,44 @@ replace_callbacks(CallbackTuples, Record, ModuleAliases) ->
     Functions = [convert_callback_tuple_to_function(M, F, ArgString, Bindings, ModuleAliases) || {M, F, ArgString} <- CallbackTuples],
     #function_el { anchor=page, function=Functions }.
 
-
+convert_callback_tuple_to_function(Module, _Function='', _ArgString=[], Bindings, ModuleAliases) ->
+    %% This is a special condition, where the callout is just [[[Variable]]].
+    %% The parser extracted the Module as the only term, and the rest was
+    %% ignored, so treat it as a simple Binding binding Lookup:
+    convert_callback_tuple_to_function('element_template', 'passthrough', wf:to_list(Module), Bindings, ModuleAliases);
+    
 convert_callback_tuple_to_function(Module, Function, ArgString, Bindings, ModuleAliases) ->
     % De-reference to page module and custom module aliases...
     Module1 = get_module_from_alias(Module, ModuleAliases),
     _F = fun() ->
         % Convert args to term...
-        Args = to_term("[" ++ ArgString ++ "].", Bindings),
+        Args = to_term(ArgString, Bindings),
 
         % If the function in exported, then call it.
         % Otherwise return undefined...
-        {module, Module1} = code:ensure_loaded(Module1),
-        case erlang:function_exported(Module1, Function, length(Args)) of
-            true -> _Elements = erlang:apply(Module1, Function, Args);
-            false -> undefined
+        case wf_utils:ensure_loaded(Module1) of
+            {error, nofile} ->
+                throw({unable_to_load_module, [
+                    {original_module, Module},
+                    {actual_module, Module1},
+                    {function, Function},
+                    {arg_string, ArgString}
+                ]});
+            {module, Module1} ->
+                case erlang:function_exported(Module1, Function, length(Args)) of
+                    true -> _Elements = erlang:apply(Module1, Function, Args);
+                    false -> undefined
+                end
         end
     end.
 
-to_term(X, Bindings) ->
+passthrough(Var) ->
+    Var.
+
+to_term([], _) ->
+    [];
+to_term(ArgString, Bindings) ->
+    X = "[" ++ ArgString ++ "].",
     S = wf:to_list(X),
     {ok, Tokens, 1} = erl_scan:string(S),
     {ok, Exprs} = erl_parse:parse_exprs(Tokens),

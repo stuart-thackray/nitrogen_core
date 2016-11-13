@@ -48,7 +48,9 @@ run_crash(Bridge, Type, Error, Stacktrace) ->
         exit:normal ->
             exit(normal);
         Type2:Error2 ->
-            ?LOG("~p~n", [{error, Type2, Error2, erlang:get_stacktrace()}]),
+            ?LOG("Crash Handler Crashed:~n~p~n~nOriginal Crash:~n~p~n", [
+                {Type2, Error2, erlang:get_stacktrace()},
+                {Type, Error, Stacktrace}]),
             Bridge1 = sbw:set_status_code(500, Bridge),
             Bridge2 = sbw:set_response_data("Internal Server Error", Bridge1),
             sbw:build_response(Bridge2)
@@ -96,7 +98,7 @@ run_catched() ->
 finish_dynamic_request() ->
     Elements = wf_context:data(),
     wf_context:clear_data(),
-    {ok, Html} = wf_render_elements:render_elements(Elements),
+    {ok, Html} = maybe_render_elements(Elements),
 	{ok, Javascript} = wf_render_actions:render_action_queue(),
 
     call_finish_on_handlers(),
@@ -109,6 +111,21 @@ finish_dynamic_request() ->
         postback_request    -> build_postback_response(JavascriptFinal);
         _                   -> build_first_response(Html, JavascriptFinal)
     end.
+
+maybe_render_elements(Elements = {file, _Filename}) ->
+    %% This will pass the {file,_} return to simple_bridge to serve a file
+    %% directly
+    {ok, Elements};
+maybe_render_elements(Elements = {stream, Size, Fun}) when is_integer(Size), is_function(Fun) ->
+    %% This is used for passing a {stream, Size, StreamFun} function to
+    %% simple_bridge (currently only works with cowboy)
+    {ok, Elements};
+maybe_render_elements(Elements) ->
+    %{Time, {ok, Html}} = timer:tc(wf_render_elements, render_elements, [Elements]),
+    %io:format("Render Time: ~p~n",[Time]),
+    %{ok, Html}.
+    {ok, _Html} = wf_render_elements:render_elements(Elements).
+
 
 finish_websocket_request() ->
     ContextData = wf_context:data(),
@@ -152,19 +169,25 @@ deserialize_websocket_context(SerializedPageContext) ->
 
 % deserialize_context/1 -
 % Updates the context with values that were stored
-% in the browser by serialize_context_state/1.
+% in the browser by serialize_context/1.
+deserialize_context(undefined) ->
+    %% If the serialized page context is undefined, don't do anything.
+    ok;
 deserialize_context(SerializedPageContext) ->
-    OldStateHandler = wf_context:handler(state_handler),
-
     % Deserialize page_context and handler_list if available...
-    [PageContext, NewStateHandler] = case SerializedPageContext of
-        undefined -> [wf_context:page_context(), OldStateHandler];
-        Other -> wf_pickle:depickle(Other)
-    end,
+    case wf_pickle:depickle(SerializedPageContext) of
+        [PageContext, NewStateHandler] ->
+            wf_context:page_context(PageContext),
+            wf_context:restore_handler(NewStateHandler),
+            ok;
+        undefined ->
+            exit({failure_to_deserialize_page_context, [
+                {serialized_page_context, SerializedPageContext},
+                {suggestion, "The most common cause of this is that "
+                             "simple_cache is not started. Try running: "
+                             "application:start(simple_cache)."}]})
+    end.
 
-    wf_context:page_context(PageContext),
-    wf_context:restore_handler(NewStateHandler),
-    ok.
 
 %%% SET UP AND TEAR DOWN HANDLERS %%%
 
@@ -172,19 +195,23 @@ deserialize_context(SerializedPageContext) ->
 % Handlers are initialized in the order that they exist in #context.handlers. The order
 % is important, as some handlers may depend on others being initialize. For example, 
 % the session handler may use the cookie handler to get or set the session cookie.
+% TODO: Re-evaluate handlers into some form of middleware layer or something.
+% Allowing us to pass handler contexts from one handler to another and limit
+% the number of process dict sets and gets
 call_init_on_handlers() ->
+    %% Get initial handlers
     Handlers = wf_context:handlers(),
-    [wf_handler:call(X#handler_context.name, init) || X <- Handlers],
+    %% Clear Handler list, to re-initiate in order
+    wf_context:handlers([]),
+    %% Re-initiate handlers in order, appending them back to the handler list as we go
+    [wf_handler:init(X) || X <- Handlers],
     ok.
 
 % finish_handlers/1 - 
 % Handlers are finished in the order that they exist in #context.handlers. The order
-% is important, as some handlers should finish after others. At the very least,
-% the 'render' handler should go last to make sure that it captures all changes
-% put in place by the other handlers.
+% is important, as some handlers should finish after others.
 call_finish_on_handlers() ->
-    Handlers = wf_context:handlers(),
-    [wf_handler:call(X#handler_context.name, finish) || X <- Handlers],
+    [wf_handler:finish(X) || X <- wf_context:handlers()],
     ok.	
 
 
@@ -192,7 +219,7 @@ call_finish_on_handlers() ->
 
 run_first_request() ->
     Module = wf_context:event_module(),
-    {module, Module} = code:ensure_loaded(Module),
+    {module, Module} = wf_utils:ensure_loaded(Module),
     EntryPoint = wf_context:entry_point(),
     Data = run_entry_point(Module, EntryPoint),
     wf_context:data(Data).

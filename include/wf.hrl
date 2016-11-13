@@ -1,7 +1,7 @@
 % vim: sw=4 ts=4 et ft=erlang
 -ifndef(wf_inc).
 -define(wf_inc, ok).
--include("crypto_compat.hrl").
+-include("compat.hrl").
 -include("wf_test.hrl").
 
 
@@ -53,6 +53,8 @@
 -type module_function()     :: {atom(), atom()}.
 -type encoding_function()   :: module_function() | fun((iolist()) -> iolist()).
 -type encoding()            :: none | unicode | auto | encoding_function().
+-type context_data()        :: iolist() | {file, Filename :: path()}
+                                | {stream, Size :: integer(), fun()}.
 -type context_type()        :: first_request | postback_request | static_file | postback_websocket.
 %%% CONTEXT %%%
 
@@ -95,7 +97,7 @@
     type                    :: context_type(),
     bridge                  :: simple_bridge:bridge(),
     anchor=undefined        :: id(), 
-    data=[]                 :: iolist(),
+    data=[]                 :: context_data(),
     encoding=auto           :: encoding(),
     action_queue=undefined  :: wf_action_queue:action_queue() | undefined,
     % These are all serialized, sent to the browser
@@ -133,9 +135,12 @@
 %%% TERNARY IF AND VARIATIONS %%%
 -define(WF_IF(Term,IfTrue,IfFalse),
     fun() ->
+        %% This is wrapped in a fun to contain the leaky-case expression. It
+        %% allows for nesting ?WF_IF calls. Though it obviously does incur the
+        %% minor overhead of creating an anonymous function then executing it.
         case Term of
             %% We use the long "WF_IF_VALUE" variable to prevent the likelyhood
-            %% of ambiguity in a function. This will throw some matching or
+            %% of a variable naming clash. This will throw some matching or
             %% "shadowing" errors if, in a function, you define a variable
             %% called "WF_IF_VALUE" before calling ?WF_IF. Given that this is
             %% unlikely to happen, this is an acceptable compromise.
@@ -373,12 +378,12 @@
 -record(option, {
         text=""                 :: text(),
         value=undefined         :: text() | atom() | undefined,
-        selected=false          :: boolean(),
+        selected                :: boolean() | undefined,
         show_if=true            :: boolean(),
         disabled=false          :: boolean()
     }).
 
--type short_option()        :: {text(), text()}.
+-type short_option()        :: {text(), text()} | text().
 -record(option_group, {
         text=""                 :: text(),
         options=[]              :: [#option{} | short_option()],
@@ -411,6 +416,7 @@
         next                    :: id(),
         postback                :: term(),
         handle_invalid=false    :: boolean(),
+        disabled=false          :: boolean(),
         on_invalid              :: undefined | actions(),
         delegate                :: module(),
         html_name               :: html_name()
@@ -497,6 +503,24 @@
         width                   :: integer(),
         height                  :: integer()
     }).
+-record(video, {?ELEMENT_BASE(element_video),
+        url=""                  :: url(),
+        poster_url=""           :: url(),
+        width=560               :: integer(),
+        height=315              :: integer(),
+        preload=metadata        :: auto | metadata | none,
+        loop=false              :: boolean(),
+        muted=false             :: boolean(),
+        autoplay=false          :: boolean(),
+        controls=false          :: boolean(),
+        body_no_support="Your browser does not support the video tag" :: body()
+    }).
+-record(youtube, {?ELEMENT_BASE(element_youtube),
+        width=560               :: integer(),
+        height=315              :: integer(),
+        key=""                  :: text(),
+        allowfullscreen=true    :: boolean()
+    }).
 -record(lightbox, {?ELEMENT_BASE(element_lightbox),
         body=[]                 :: body()
     }).
@@ -542,7 +566,7 @@
 -record(bind, {?ELEMENT_BASE(element_bind),
         data=[]                 :: list(),
         map=[]                  :: list() | tuple(),
-        transform               :: fun(),
+        transform               :: fun() | undefined,
         acc=[]                  :: term(),
         body=[]                 :: body(),
         empty_body=[]           :: body()
@@ -633,7 +657,10 @@
         back="Back"             :: text(),
         finish="Finish"         :: text(),
         show_progress=true      :: boolean(),
-        progress_text="(Step ~p of ~p)" :: text()
+        progress_text="(Step ~p of ~p)" :: text(),
+        next_class=""           :: text() | [text()],
+        back_class=""           :: text() | [text()],
+        finish_class=""         :: text() | [text()]
     }).
 -record(sparkline, {?ELEMENT_BASE(element_sparkline),
         type=line               :: line | bar | tristate | bullet | discrete | pie | box,
@@ -910,6 +937,10 @@
 -record(function, {?ACTION_BASE(action_function),
         function                :: fun() | undefined
     }).
+-record(js_fun, {?ACTION_BASE(action_js_fun),
+        function                :: atom() | text(),
+        args=[]                 :: [text()]
+    }).
 -record(set, {?ACTION_BASE(action_set),
         value=""                :: text() | integer()
     }).
@@ -917,7 +948,8 @@
         values=[]               :: [text()]
     }).
 -record(redirect, {?ACTION_BASE(action_redirect),
-        url=""                  :: url()
+        url=""                  :: url(),
+        login=false             :: boolean() | url()
     }).
 -record(event, {?ACTION_BASE(action_event),
         type=default            :: atom(),
@@ -1029,7 +1061,10 @@
         cookie                  :: atom() | text(),
         value=""                :: atom() | text(),
         path="/"                :: text(),
-        minutes_to_live=20      :: integer()
+        domain=undefined        :: undefined | text(),
+        minutes_to_live=20      :: integer(),
+        secure=false            :: boolean(),
+        http_only=false         :: boolean()
     }).
 
 %%% Validators %%%
@@ -1046,7 +1081,13 @@
 -record(is_email, {?VALIDATOR_BASE(validator_is_email)}).
 -record(is_integer, {?VALIDATOR_BASE(validator_is_integer),
         min                     :: undefined | integer(),
-        max                     :: undefined | integer()
+        max                     :: undefined | integer(),
+        allow_blank=false       :: boolean()
+    }).
+-record(is_number, {?VALIDATOR_BASE(validator_is_number),
+        min                     :: undefined | integer(),
+        max                     :: undefined | integer(),
+        allow_blank=false       :: boolean()
     }).
 -record(min_length, {?VALIDATOR_BASE(validator_min_length),
         length                  :: undefined | integer()

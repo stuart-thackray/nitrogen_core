@@ -62,8 +62,14 @@ wire_postback(Dropdown) ->
 
 format_options(Dropdown) when Dropdown#dropdown.options==undefined ->
     "";
-format_options(#dropdown{options=Opts, value=Value, html_encode=HtmlEncode}) ->
-    create_options(wf:to_binary(Value), HtmlEncode, Opts).
+format_options(#dropdown{options=Opts, value=Value0, html_encode=HtmlEncode}) ->
+    Value = binary_or_undefined(Value0),
+    create_options(Value, HtmlEncode, Opts).
+
+binary_or_undefined(undefined) ->
+    undefined;
+binary_or_undefined(V) ->
+    wf:to_binary(V).
 
 create_options(_,_,[]) ->
     [];
@@ -77,6 +83,8 @@ create_options(Selected,HtmlEncode,[X=#option{show_if=true} | Rest]) ->
     [create_option_full(Selected, HtmlEncode, X) | create_options(Selected,HtmlEncode,Rest)];
 create_options(Selected,HtmlEncode,[#option{show_if=false} | Rest]) ->
     create_options(Selected,HtmlEncode,Rest);
+create_options(Selected,HtmlEncode,[Other | Rest]) when ?IS_STRING(Other); is_binary(Other); is_integer(Other); is_atom(Other) ->
+    [create_option_simple(Selected, HtmlEncode, Other) | create_options(Selected,HtmlEncode, Rest)];
 create_options(_,_,[Other | _]) ->
     throw({unknown_option_provided_to_dropdown_element,Other}).
 
@@ -89,6 +97,9 @@ create_option_group(Selected, HtmlEncode, #option_group{text=Text, options=Optio
         DisabledProp
     ],
     wf_tags:emit_tag(optgroup, OptionTags, Props).
+
+create_option_simple(Selected, HtmlEncode, Value) ->
+    create_option_from_tuple(Selected, HtmlEncode, {Value, Value}).
 
 create_option_from_tuple(Selected, HtmlEncode, {Value, Text}) ->
     Option = #option{text=Text, value=Value},
@@ -106,10 +117,27 @@ create_option_full(Selected, HtmlEncode, Opt = #option{text=Text, value=Value, d
     ],
     wf_tags:emit_tag(option, Content, Props).
 
--spec is_selected(Selected :: binary(), X :: #option{}) -> boolean().
-is_selected(_Selected, #option{selected=true}) ->
+-spec is_selected(DropDownValue :: binary()|undefined, X :: #option{}) -> boolean().
+is_selected(_DropDownValue, #option{selected=true})  ->
+    %% If the #option.selected=true, then short-circuit and return true.
     true;
-is_selected(Selected, _X) when Selected =:= <<>> ->
+is_selected(DropDownValue, #option{selected=OptSelected, value=OptValue})
+        when OptSelected=:=false;
+             OptValue=:=undefined;
+             DropDownValue=:=undefined ->
     false;
-is_selected(Selected, #option{value=Value}) ->
-    wf:to_binary(Value) =:= Selected.
+is_selected(DropDownValue, #option{value=OptValue}) ->
+    %% Finally, if none of the above short-circuits trip, then we can convert
+    %% #option.value to binary and compare directly. If they match, then it's
+    %% selected.
+    wf:to_binary(OptValue) =:= DropDownValue.
+
+-include_lib("eunit/include/eunit.hrl").
+
+html_encode_test() ->
+    ?assertEqual(true, is_selected(<<"anything">>, #option{selected=true})),
+    ?assertEqual(false, is_selected(<<"anything">>, #option{selected=false})),
+    ?assertEqual(true, is_selected(<<"apple">>, #option{value=apple})),
+    ?assertEqual(false, is_selected(<<"other_thing">>, #option{value=apple})),
+    ?assertEqual(true, is_selected(<<"apple">>, #option{value=apple, selected=true})),
+    ?assertEqual(false, is_selected(<<"apple">>, #option{value=apple, selected=false})).
